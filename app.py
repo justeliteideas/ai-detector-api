@@ -5,19 +5,18 @@ import torch
 
 app = FastAPI()
 
-# 你的 Hugging Face 模型地址
-MODEL_ID = "jdifbread/my-detector-model"
+# 🚨 确认这里是你 Hugging Face 的迷你模型地址
+MODEL_ID = "jdifbread/my-detector-mini" 
 
-print("正在下载并加载模型，请稍候...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
 
-# 🚨 关键：加上 low_cpu_mem_usage=True，极度节省内存
+# 🚨 极限省内存模式
 model = AutoModelForSequenceClassification.from_pretrained(
     MODEL_ID, 
-    low_cpu_mem_usage=True
+    low_cpu_mem_usage=True,
+    torch_dtype=torch.float16
 )
 model.eval()
-print("模型加载完毕！")
 
 class TextRequest(BaseModel):
     text: str
@@ -27,7 +26,7 @@ def detect(request: TextRequest):
     inputs = tokenizer(request.text, return_tensors="pt", truncation=True, max_length=256)
     with torch.no_grad():
         outputs = model(**inputs)
-    probs = torch.nn.functional.softmax(outputs.logits, dim=-1)
+    probs = torch.nn.functional.softmax(outputs.logits.float(), dim=-1)
     ai_prob = probs[0][1].item()
     return {"ai_probability": round(ai_prob, 4)}
 
