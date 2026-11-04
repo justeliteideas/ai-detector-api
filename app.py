@@ -4,10 +4,10 @@ from pydantic import BaseModel
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 import torch
 import re
+import traceback
 
 app = FastAPI()
 
-# 🚨 允许跨域请求，防止 Z.ai 报跨域错误
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,12 +17,12 @@ app.add_middleware(
 )
 
 MODEL_ID = "jdifbread/my-detector-mini" 
-
 tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+
+# 🚨 关键修改：去掉了 torch_dtype=torch.float16，改回 CPU 最兼容的 float32
 model = AutoModelForSequenceClassification.from_pretrained(
     MODEL_ID, 
-    low_cpu_mem_usage=True,
-    torch_dtype=torch.float16
+    low_cpu_mem_usage=True
 )
 model.eval()
 
@@ -31,36 +31,30 @@ class TextRequest(BaseModel):
 
 @app.post("/detect")
 def detect(request: TextRequest):
-    # 按句号、问号、感叹号切分句子
-    sentences = re.split(r'(?<=[.!?]) +', request.text)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    
-    if not sentences:
-        return {"document_score": 0, "sentences": []}
-
-    # 🚨 关键升级：批量处理，一次性算完所有句子！
-    inputs = tokenizer(sentences, return_tensors="pt", padding=True, truncation=True, max_length=256)
-    
-    with torch.no_grad():
-        outputs = model(**inputs)
+    try:
+        sentences = re.split(r'(?<=[.!?]) +', request.text)
+        sentences = [s.strip() for s in sentences if s.strip()]
         
-    probs = torch.nn.functional.softmax(outputs.logits.float(), dim=-1)
-    ai_probs = probs[:, 1].tolist()
-    
-    results = []
-    total_score = 0
-    
-    for i, sentence in enumerate(sentences):
-        score = round(ai_probs[i], 4)
-        results.append({"text": sentence, "score": score})
-        total_score += score
+        results = []
+        total_score = 0
         
-    avg_score = total_score / len(sentences) if sentences else 0
+        for sentence in sentences:
+            inputs = tokenizer(sentence, return_tensors="pt", truncation=True, max_length=256)
+            with torch.no_grad():
+                outputs = model(**inputs)
+            probs = torch.nn.functional.softmax(outputs.logits, dim=-1) # 移除 .float()
+            score = round(probs[0][1].item(), 4)
+            results.append({"text": sentence, "score": score})
+            total_score += score
+            
+        avg_score = total_score / len(sentences) if sentences else 0
 
-    return {
-        "document_score": round(avg_score, 4),
-        "sentences": results
-    }
+        return {"document_score": round(avg_score, 4), "sentences": results}
+
+    except Exception as e:
+        # 如果崩溃了，把错误信息返回给前端，让我们知道到底怎么死的
+        print(traceback.format_exc())
+        return {"error": str(e), "document_score": 0, "sentences": []}
 
 @app.get("/")
 def health():
